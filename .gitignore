@@ -1,0 +1,99 @@
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+.DS_Store
+.directory
+# Build directories
+zigbee_macropad_esp_idf/build/
+**/build/
+
+# ESP-IDF dependencies
+zigbee_macropad_esp_idf/components/.idf/
+**/components/.idf/
+managed_components
+
+# Project configuration
+sdkconfig
+sdkconfig.old
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+Makefile
+
+# Python environment files
+*.pyc
+*.pyo
+*.pyd
+__pycache__
+
+# ESP32 toolchain files
+.espressif/
+
+# IDE specific files (e.g., Visual Studio Code, Eclipse)
+.idea/
+*.user
+*.workspace
+*.suo
+*.sln
+
+# ESP32 flash files
+*.bin
+*.elf
+*.map
+
+# Generated documentation
+zigbee_macropad_esp_idf/docs/
+
+# ESP-IDF logs
+*.log
