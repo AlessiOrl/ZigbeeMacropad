@@ -16,6 +16,9 @@
 
 #define TAG                 "MACROPAD"
 
+// Set to 1 to enable external antenna (XIAO ESP32C6), 0 for internal
+#define USE_EXTERNAL_ANTENNA 1
+
 /* --- PINS --------------------------------------------------------------- */
 #define ROWS 4
 #define COLS 4
@@ -37,7 +40,7 @@
 #define ENC_STEPS_PER_DETENT 4
 
 // Throttle how often we publish Zigbee rotate events.
-#define ENC_REPORT_INTERVAL_MS 100
+#define ENC_REPORT_INTERVAL_MS 60
 
 //Must be RST Pins (support deep sleep)
 static const gpio_num_t ROW_PINS[ROWS] = {
@@ -610,6 +613,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *sig)
         } else {
             g_is_joined = false;
             ESP_LOGI(TAG, "Steering failed → retry");
+            /* Retry steering after 1 second */
+            esp_zb_scheduler_alarm(start_network_steering, 0, 1000);
         }
         break;
 
@@ -863,6 +868,7 @@ void app_main(void)
 
     // --- Enable EXTERNAL ANTENNA (XIAO ESP32C6) ---
     // See: https://wiki.seeedstudio.com/xiao_esp32c6_getting_started/#hardware-overview
+#if USE_EXTERNAL_ANTENNA
     {
         gpio_config_t ant_conf = {
             .pin_bit_mask = (1ULL << GPIO_NUM_3) | (1ULL << GPIO_NUM_14),
@@ -879,6 +885,9 @@ void app_main(void)
         
         ESP_LOGI(TAG, "External antenna enabled (GPIO3=0, GPIO14=1)");
     }
+#else
+    ESP_LOGI(TAG, "Using internal antenna");
+#endif
 
     matrix_gpio_init();
     // Initialise button state array
@@ -974,7 +983,7 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
 
-    xTaskCreate(esp_zb_task, "ZB_main", 8192, NULL, 5, NULL);        
+    xTaskCreate(esp_zb_task, "ZB_main", 12288, NULL, 5, NULL);        
     
     ESP_LOGI(TAG, "Ready.");
 }
