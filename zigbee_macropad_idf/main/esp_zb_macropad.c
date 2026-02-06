@@ -11,12 +11,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-
+#include "freertos/semphr.h"
+#include "esp_pm.h"
 
 #define TAG                 "MACROPAD"
 
 // Set to 1 to enable external antenna (XIAO ESP32C6), 0 for internal
 #define USE_EXTERNAL_ANTENNA 1
+
+#define FAKE_SLEEP_TIMEOUT_MS 30000 
+
 
 /* --- PINS --------------------------------------------------------------- */
 #define ROWS 4
@@ -88,6 +92,8 @@ typedef struct {
 
 static QueueHandle_t s_boot_evt_q = NULL;
 static QueueHandle_t s_enc_evt_q  = NULL;
+static SemaphoreHandle_t s_wakeup_sem = NULL;
+static int64_t g_last_activity_time_us = 0;
 
 static btn_state_t g_btn[BTN_COUNT];
 static btn_state_t g_enc_btn;
@@ -98,6 +104,63 @@ static bool g_zb_ready      = false;
 
 /* --- Helpers ------------------------------------------------------------ */
 static inline uint64_t now_us(void) { return esp_timer_get_time(); }
+
+static void update_activity(void) {
+    g_last_activity_time_us = now_us();
+}
+
+static void IRAM_ATTR wakeup_isr(void *arg) {
+    (void)arg;
+    if (s_wakeup_sem) {
+        BaseType_t high_woken = pdFALSE;
+        xSemaphoreGiveFromISR(s_wakeup_sem, &high_woken);
+        if (high_woken) {
+            portYIELD_FROM_ISR();
+        }
+    }
+}
+
+static void enter_fake_sleep(void)
+{
+    ESP_LOGI(TAG, "Entering fake sleep (low Hz)...");
+
+    // 1. Drive all columns LOW so that any row press pulls the row input LOW
+    for (int c = 0; c < COLS; ++c) {
+        gpio_set_level(COL_PINS[c], 0);
+    }
+    
+    // 2. Enable interrupts on Rows (detect falling edge)
+    for (int r = 0; r < ROWS; ++r) {
+        gpio_set_intr_type(ROW_PINS[r], GPIO_INTR_NEGEDGE);
+        gpio_intr_enable(ROW_PINS[r]);
+    }
+    
+    // 3. Enable interrupt on Encoder Switch
+    gpio_set_intr_type(ENC_SW_GPIO, GPIO_INTR_NEGEDGE);
+    gpio_intr_enable(ENC_SW_GPIO);
+}
+
+static void exit_fake_sleep(void)
+{
+    // 1. Disable interrupts on Rows and Switch to resume polling
+    for (int r = 0; r < ROWS; ++r) {
+        gpio_intr_disable(ROW_PINS[r]);
+        gpio_set_intr_type(ROW_PINS[r], GPIO_INTR_DISABLE);
+    }
+    gpio_intr_disable(ENC_SW_GPIO);
+    gpio_set_intr_type(ENC_SW_GPIO, GPIO_INTR_DISABLE);
+
+    // 2. Restore Columns to idle HIGH
+    for (int c = 0; c < COLS; ++c) {
+        gpio_set_level(COL_PINS[c], 1);
+    }
+    
+    // Wait for lines to stabilize
+    esp_rom_delay_us(50);
+
+    ESP_LOGI(TAG, "Woke up!");
+    update_activity();
+}
 
 typedef enum { ACT_NONE, ACT_SINGLE, ACT_DOUBLE, ACT_HOLD } action_t;
 
@@ -181,6 +244,14 @@ static void IRAM_ATTR encoder_isr(void *arg)
     if (s_enc_evt_q) {
         xQueueSendFromISR(s_enc_evt_q, &dummy, NULL);
     }
+    // Wake up if sleeping
+    if (s_wakeup_sem) {
+         BaseType_t high_woken = pdFALSE;
+         xSemaphoreGiveFromISR(s_wakeup_sem, &high_woken);
+         if (high_woken) {
+             portYIELD_FROM_ISR();
+         }
+    }
 }
 
 static void boot_button_task(void *arg) {
@@ -231,6 +302,8 @@ static void encoder_task(void *arg)
     int32_t edge_acc = 0;
     int32_t detent_acc = 0;
     uint64_t last_report_us = now_us();
+    
+    update_activity();
 
     while (true) {
         // Wait for edges; also periodically flush accumulated detents.
@@ -238,6 +311,7 @@ static void encoder_task(void *arg)
         const uint64_t now = now_us();
 
         if (got) {
+            update_activity();
             const uint8_t curr = enc_read_state();
             const int8_t d = enc_quadrature_delta(prev, curr);
             prev = curr;
@@ -436,18 +510,42 @@ static void button_task(void *arg)
     const uint64_t enc_ultra_us     = ENC_ULTRA_PRESS_MS * 1000ULL;
 
     bool raw_states[BTN_COUNT];
+    
+    update_activity();
+
     while (true) {
         uint64_t now = now_us();
+
+        // -----------------------------------------------------------
+        // INACTIVITY CHECK -> FAKE SLEEP
+        // -----------------------------------------------------------
+        if ((now - g_last_activity_time_us) > (FAKE_SLEEP_TIMEOUT_MS * 1000ULL)) {
+            // Enter lower power mode
+            enter_fake_sleep();
+
+            // Wait indefinitely for a semaphore signal (ISR)
+            xSemaphoreTake(s_wakeup_sem, portMAX_DELAY);
+
+            // Resume normal mode
+            exit_fake_sleep();
+            now = now_us();
+        }
 
         // Always process encoder switch so ultra-long press can trigger pairing even
         // when the device is factory-new / not joined yet.
         bool enc_raw = (gpio_get_level(ENC_SW_GPIO) == 0);
+        if (enc_raw) {
+            update_activity();
+        }
+
         process_encoder_switch(&g_enc_btn, enc_raw, now,
                                debounce_us, double_click_us, enc_ultra_us);
 
         // Skip scanning matrix buttons until joined (avoids spamming logs/logic when not connected).
         if(!g_is_joined)
         {
+            // If we are interacting with Encoder Switch (for pairing), we are active.
+            // If just idle, we will eventually sleep above.
             vTaskDelay(pdMS_TO_TICKS(BTN_POLL_INTERVAL_MS));
             continue;
         }
@@ -457,6 +555,9 @@ static void button_task(void *arg)
         
         // 2. Run your existing state machine per logical button
         for (int i = 0; i < BTN_COUNT; ++i) {
+            if (raw_states[i]) {
+                update_activity();
+            }
             process_button_state((uint8_t)i, &g_btn[i], raw_states[i], now,
                                  debounce_us, double_click_us, long_press_us);
         }
@@ -757,6 +858,9 @@ static void macropad_send_encoder_rotate(bool clockwise, uint8_t steps)
 /* ======================================================================= */
 void app_main(void)
 {
+    // Wait a bit for USB Serial JTAG to stabilize before printing or doing power mgmt
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    
     // --- Enable EXTERNAL ANTENNA (XIAO ESP32C6) ---
     // See: https://wiki.seeedstudio.com/xiao_esp32c6_getting_started/#hardware-overview
 #if USE_EXTERNAL_ANTENNA
@@ -829,12 +933,29 @@ void app_main(void)
     // --- Create queue ---
     s_boot_evt_q = xQueueCreate(4, sizeof(uint32_t));
     s_enc_evt_q  = xQueueCreate(16, sizeof(uint32_t));
+    s_wakeup_sem = xSemaphoreCreateBinary();
 
     // --- Install ISR service ONCE ---
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
     gpio_isr_handler_add(BOOT_BUTTON_GPIO, boot_button_isr, NULL);
     gpio_isr_handler_add(ENC_A_GPIO, encoder_isr, NULL);
     gpio_isr_handler_add(ENC_B_GPIO, encoder_isr, NULL);
+
+    // Add Wakeup ISR handlers for Rows & Switch (Interrupts enabled only in sleep)
+    for (int r = 0; r < ROWS; ++r) {
+        gpio_isr_handler_add(ROW_PINS[r], wakeup_isr, NULL);
+    }
+    gpio_isr_handler_add(ENC_SW_GPIO, wakeup_isr, NULL);
+
+#if CONFIG_PM_ENABLE
+    esp_pm_config_esp32c6_t pm_config = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = false
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+    ESP_LOGI(TAG, "Dynamic Frequency Scaling enabled (40-160 MHz)");
+#endif
 
     // --- Launch tasks ---
     xTaskCreate(button_task, "button_task", 4096, NULL, 1, NULL);
