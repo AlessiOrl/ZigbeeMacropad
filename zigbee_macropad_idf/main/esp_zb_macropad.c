@@ -4,7 +4,6 @@
 #include "esp_zb_macropad.h"
 #include "esp_check.h"
 #include "esp_log.h"
-#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "nvs_flash.h"
@@ -42,7 +41,7 @@
 // Throttle how often we publish Zigbee rotate events.
 #define ENC_REPORT_INTERVAL_MS 60
 
-//Must be RST Pins (support deep sleep)
+// Row input pins
 static const gpio_num_t ROW_PINS[ROWS] = {
     GPIO_NUM_0, GPIO_NUM_1, GPIO_NUM_2, GPIO_NUM_4,
 }; //D0, D1, D2, MTMS
@@ -52,14 +51,8 @@ static const gpio_num_t COL_PINS[COLS] = {
     GPIO_NUM_17, GPIO_NUM_19, GPIO_NUM_20, GPIO_NUM_18,
 }; //D10, D9, D8, D7
 
-//Native physical button button on board can still be connected with external button
+// Native physical button on board can still be connected with external button
 #define BOOT_BUTTON_GPIO     GPIO_NUM_9
-
-/* --- Deep sleep variables -------------------------------------- */
-#define INACTIVITY_SLEEP_MS   (1200 * 1000)        // 1 minute --> 20sec test
-#define INACTIVITY_SLEEP_US   (INACTIVITY_SLEEP_MS * 1000ULL)
-
-static uint64_t g_last_activity_us = 0;
 
 /* --- Timing (ms) for local keypad -------------------------------------- */
 #define BTN_POLL_INTERVAL_MS   10
@@ -92,12 +85,6 @@ typedef struct {
     uint64_t last_release_us;
     bool hold_fired;
 } btn_state_t;
-
-typedef struct {
-    uint8_t idx;       // which button (0–15)
-    uint64_t timestamp_us;
-    bool level;        // 0 = pressed, 1 = released
-} btn_evt_t;
 
 static QueueHandle_t s_boot_evt_q = NULL;
 static QueueHandle_t s_enc_evt_q  = NULL;
@@ -157,79 +144,6 @@ static void matrix_gpio_init(void)
         gpio_config(&io_conf);
         gpio_set_level(COL_PINS[c], 1); // idle high
     }
-}
-
-/* ======================================================================= */
-/*                          SLEEP                                          */
-/* ======================================================================= */
-static uint64_t build_row_wakeup_mask(void)
-{
-    uint64_t mask = 0;
-
-    for (int r = 0; r < ROWS; ++r) {
-        gpio_num_t gpio = ROW_PINS[r];
-
-        // Optional sanity check: make sure this pin *can* be used for wake
-        if (!esp_sleep_is_valid_wakeup_gpio(gpio)) {
-            ESP_LOGE(TAG, "GPIO %d is not a valid deep sleep wake pin!", gpio);
-        }
-        mask |= (1ULL << gpio);  // BIT(gpio)
-    }
-
-    return mask;
-}
-
-void macropad_enter_deep_sleep(void)
-{
-    ESP_LOGI(TAG, "Preparing to enter deep sleep...");
-
-    // 1) Columns: outputs LOW so any pressed key can pull rows LOW via diodes
-    for (int c = 0; c < COLS; ++c) {
-        gpio_config_t col_conf = {
-            .pin_bit_mask = 1ULL << COL_PINS[c],
-            .mode = GPIO_MODE_OUTPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-        gpio_config(&col_conf);
-
-        gpio_set_level(COL_PINS[c], 0);   // keep column LOW in deep sleep
-
-        // Optional: hold this level through deep sleep
-        gpio_hold_en(COL_PINS[c]);
-    }
-
-    // 2) Rows: inputs (no interrupts), we'll rely on wakeup logic instead
-    for (int r = 0; r < ROWS; ++r) {
-        gpio_config_t row_conf = {
-            .pin_bit_mask = 1ULL << ROW_PINS[r],
-            .mode = GPIO_MODE_INPUT,
-            .pull_up_en = GPIO_PULLUP_ENABLE,    // keep them HIGH when idle
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-        gpio_config(&row_conf);
-    }
-
-    // 3) Enable deep sleep wake on rows, triggered when they go LOW
-    uint64_t wake_mask = build_row_wakeup_mask();
-
-    esp_err_t err = esp_deep_sleep_enable_gpio_wakeup(
-        wake_mask,
-        ESP_GPIO_WAKEUP_GPIO_LOW     // wake when any selected GPIO turns LOW
-    );
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable GPIO wakeup (err=0x%x)", err);
-    }
-
-    ESP_LOGI(TAG, "Entering deep sleep, wake mask=0x%llx", (unsigned long long)wake_mask);
-
-    // Optional: log flush
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    esp_deep_sleep_start();
-    // never returns
 }
 
 /* ======================================================================= */
@@ -353,7 +267,6 @@ static void encoder_task(void *arg)
                 }
 
                 macropad_send_encoder_rotate(clockwise, (uint8_t)steps);
-                g_last_activity_us = now;
             }
 
             detent_acc = 0;
@@ -436,7 +349,6 @@ static void process_button_state(uint8_t button_id, btn_state_t *b, bool raw,
             if (!b->hold_fired) {
                 if (b->last_release_us && (now - b->last_release_us < double_click_us)) {
                     on_button_action(button_id, ACT_DOUBLE);
-                    g_last_activity_us = now;
                     b->last_release_us = 0;
                 } else {
                     b->last_release_us = now;
@@ -449,14 +361,12 @@ static void process_button_state(uint8_t button_id, btn_state_t *b, bool raw,
     if (b->stable && !b->hold_fired && now - b->press_start_us > long_press_us) {
         b->hold_fired = true;
         on_button_action(button_id, ACT_HOLD);
-        g_last_activity_us = now;
         b->last_release_us = 0;
     }
 
     // single click confirmation (timeout expired)
     if (!b->stable && b->last_release_us && now - b->last_release_us > double_click_us) {
         on_button_action(button_id, ACT_SINGLE);
-        g_last_activity_us = now;
         b->last_release_us = 0;
     }
 }
@@ -482,7 +392,6 @@ static void process_encoder_switch(btn_state_t *b, bool raw,
                     // Only emit click actions when joined (otherwise there's no coordinator to report to).
                     if (g_is_joined) {
                         on_button_action(ENC_BUTTON_ID, ACT_DOUBLE);
-                        g_last_activity_us = now;
                     }
                     b->last_release_us = 0;
                 } else {
@@ -499,7 +408,6 @@ static void process_encoder_switch(btn_state_t *b, bool raw,
     if (b->stable && !b->hold_fired && now - b->press_start_us > ultra_long_us) {
         b->hold_fired = true;
         b->last_release_us = 0;
-        g_last_activity_us = now;
 
         ESP_LOGW(TAG, "Encoder ultra-long press -> pairing");
         if (g_zb_ready) {
@@ -514,7 +422,6 @@ static void process_encoder_switch(btn_state_t *b, bool raw,
         // Only emit click actions when joined.
         if (g_is_joined) {
             on_button_action(ENC_BUTTON_ID, ACT_SINGLE);
-            g_last_activity_us = now;
         }
         b->last_release_us = 0;
     }
@@ -552,15 +459,6 @@ static void button_task(void *arg)
         for (int i = 0; i < BTN_COUNT; ++i) {
             process_button_state((uint8_t)i, &g_btn[i], raw_states[i], now,
                                  debounce_us, double_click_us, long_press_us);
-        }
-
-        // 3. Encoder switch already processed above
-        // 🔹 Inactivity check here
-        if (now - g_last_activity_us > INACTIVITY_SLEEP_US) {
-            ESP_LOGI(TAG, "No activity for %llu us, entering deep sleep",
-                     (unsigned long long)(now - g_last_activity_us));
-            macropad_enter_deep_sleep();
-            // esp_deep_sleep_start() does not return
         }
 
         vTaskDelay(pdMS_TO_TICKS(BTN_POLL_INTERVAL_MS));
@@ -859,13 +757,6 @@ static void macropad_send_encoder_rotate(bool clockwise, uint8_t steps)
 /* ======================================================================= */
 void app_main(void)
 {
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    
-    // Clear holds so we can reconfigure pins
-    for (int c = 0; c < COLS; ++c) {
-        gpio_hold_dis(COL_PINS[c]);
-    }
-
     // --- Enable EXTERNAL ANTENNA (XIAO ESP32C6) ---
     // See: https://wiki.seeedstudio.com/xiao_esp32c6_getting_started/#hardware-overview
 #if USE_EXTERNAL_ANTENNA
@@ -895,30 +786,6 @@ void app_main(void)
         btn_state_reset(&g_btn[i]);
     }
     btn_state_reset(&g_enc_btn);
-    g_last_activity_us = now_us();
-    
-    if (cause == ESP_SLEEP_WAKEUP_GPIO) {
-        // We woke because some row went LOW (button pressed).
-        // Try to see which button(s) are still pressed *right now*.
-        bool raw_states[BTN_COUNT];
-        matrix_scan(raw_states);
-
-        for (int i = 0; i < BTN_COUNT; ++i) {
-            if (raw_states[i]) {
-                btn_state_t *b = &g_btn[i];
-                // Pretend this button is currently pressed
-                b->stable         = true;
-                b->prev_stable    = false;
-                b->hold_fired     = false;
-                b->press_start_us = g_last_activity_us;
-                b->last_change_us = g_last_activity_us;
-                b->last_release_us = 0;
-
-                // You could log it for debugging:
-                ESP_LOGI(TAG, "Woke with button %d pressed", i);
-            }
-        }
-    }
     nvs_flash_init();
 
     ESP_LOGI(TAG, "Starting 16-button macropad");
