@@ -1,3 +1,7 @@
+# Redesigned from the original project by [StaRky33](https://github.com/StaRky33/ZigbeeMacropad)
+
+A huge thank you for the work you put into this project and for generously sharing it as open and free software. 
+
 # 🧠 Zigbee Macropad (ESP32-C6)
 
 A compact **16-key Zigbee macropad** with a **Rotary Encoder**, powered by the **Seeed Studio XIAO ESP32-C6**.  
@@ -6,7 +10,6 @@ Designed for integration with **Home Assistant (ZIGBEE2MQTT)**, it operates via 
 It gives 3 types of button inputs (single click, double click, long press) and rotary encoder events (left, right, press) to add into any automation to control devices remotely.
 
 ---
-
 ## ⚙️ Hardware
 
 | Component | Description |
@@ -21,21 +24,6 @@ It gives 3 types of button inputs (single click, double click, long press) and r
 | **Case** | 3D-printed PLA enclosure |
 | **Keycaps**| 16 x Bought Cherry MX Keycaps |
 | **Knob** | 1 x 3D-printed or standard Encode Knob |
-
-
----
-
-## 🧩 3D-Printed Parts
-
-Designed and customized in **Tinkercad**, printed with **Centauri Carbon and transparent PLA**.  
-Printed at 0.2 mm layer height, 15–20% infill, no supports required.
-
-Files available on Github or in Printables [here](https://www.printables.com/model/1496778-zigbee-macropad-16-buttons-esp32c6) or Thingiverse [there](https://www.thingiverse.com/thing:7215442).
-
-### 🔗 Remixed Models
-- [16 Keys Macropad](https://www.printables.com/model/140766-16-keys-macropad)  
-
----
 
 ## 💻 Code
 
