@@ -13,6 +13,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "esp_pm.h"
+#include "esp_sleep.h"
 
 #define TAG                 "MACROPAD"
 
@@ -20,7 +21,7 @@
 #define USE_EXTERNAL_ANTENNA 1
 
 #define FAKE_SLEEP_TIMEOUT_MS 30000 
-
+#define DEEP_SLEEP_TIMEOUT_MS (6 * 60 * 60 * 1000ULL) // 6 Hours
 
 /* --- PINS --------------------------------------------------------------- */
 #define ROWS 4
@@ -64,7 +65,7 @@ static const gpio_num_t COL_PINS[COLS] = {
 #define DOUBLE_CLICK_MS   400
 #define HOLD_PRESS_MS    1000
 // Encoder switch: use ultra-long press to enter pairing mode.
-#define ENC_ULTRA_PRESS_MS 8000
+#define ENC_ULTRA_PRESS_MS 6000
 
 /* --- Endpoint and clusters -------------------------------------- */
 #define MACROPAD_ENDPOINT            0x01
@@ -118,6 +119,37 @@ static void IRAM_ATTR wakeup_isr(void *arg) {
             portYIELD_FROM_ISR();
         }
     }
+}
+
+static void enter_deep_sleep(void)
+{
+    ESP_LOGI(TAG, "Entering deep sleep (6h inactivity)...");
+
+    // 1. Drive all columns LOW and HOLD them
+    for (int c = 0; c < COLS; ++c) {
+        // Set level 0
+        gpio_set_level(COL_PINS[c], 0);
+        // Enable pad hold in deep sleep to keep them driving LOW
+        gpio_hold_en(COL_PINS[c]);
+    }
+
+    // 2. Enable deep sleep wakeup on Row pins
+    //    Level must be LOW to trigger wakeup (since Columns are driving LOW)
+    for (int r = 0; r < ROWS; ++r) {
+        // Ensure they are input + pullup
+        gpio_set_direction(ROW_PINS[r], GPIO_MODE_INPUT);
+        gpio_pullup_en(ROW_PINS[r]);
+        
+        // Enable logic wakeup
+        esp_deep_sleep_enable_gpio_wakeup(1ULL << ROW_PINS[r], ESP_GPIO_WAKEUP_GPIO_LOW);
+    }
+    
+    // Note: Rotary encoder pins and Button pins are NOT enabled for wakeup
+    
+    ESP_LOGI(TAG, "Goodbye!");
+    
+    // 3. Start deep sleep
+    esp_deep_sleep_start();
 }
 
 static void enter_fake_sleep(void)
@@ -517,16 +549,38 @@ static void button_task(void *arg)
         uint64_t now = now_us();
 
         // -----------------------------------------------------------
+        // INACTIVITY CHECK -> DEEP SLEEP (Priority over fake sleep)
+        // -----------------------------------------------------------
+        uint64_t idle_us = now - g_last_activity_time_us;
+        uint64_t deep_sleep_us = DEEP_SLEEP_TIMEOUT_MS * 1000ULL;
+
+        if (idle_us > deep_sleep_us) {
+            enter_deep_sleep();
+            // Function does not return
+        }
+
+        // -----------------------------------------------------------
         // INACTIVITY CHECK -> FAKE SLEEP
         // -----------------------------------------------------------
-        if ((now - g_last_activity_time_us) > (FAKE_SLEEP_TIMEOUT_MS * 1000ULL)) {
+        if (idle_us > (FAKE_SLEEP_TIMEOUT_MS * 1000ULL)) {
             // Enter lower power mode
             enter_fake_sleep();
 
-            // Wait indefinitely for a semaphore signal (ISR)
-            xSemaphoreTake(s_wakeup_sem, portMAX_DELAY);
+            // Calculate time remaining until deep sleep
+            uint64_t time_left_us = (deep_sleep_us > idle_us) ? (deep_sleep_us - idle_us) : 0;
+            // Convert to ticks, ensure it fits in TickType_t. 
+            // 6h is ~21.6M ms, fits in uint32_t even at 1000Hz tick rate.
+            TickType_t wait_ticks = pdMS_TO_TICKS(time_left_us / 1000);
 
-            // Resume normal mode
+            // Wait for wakeup signal OR timeout (transition to deep sleep)
+            if (xSemaphoreTake(s_wakeup_sem, wait_ticks) == pdFALSE) {
+                // Timeout elapsed -> Go to Deep Sleep
+                ESP_LOGI(TAG, "Fake sleep timed out -> transition to Deep Sleep");
+                exit_fake_sleep(); // Clean up interrupts/GPIOs first (restores polling mode)
+                enter_deep_sleep(); // Configures for Deep Sleep and halts
+            }
+
+            // Resume normal mode (Activity detected)
             exit_fake_sleep();
             now = now_us();
         }
@@ -858,6 +912,16 @@ static void macropad_send_encoder_rotate(bool clockwise, uint8_t steps)
 /* ======================================================================= */
 void app_main(void)
 {
+    // If waking from deep sleep, we must un-hold the pads so we can drive them normally again.
+    // However, on some chips pad hold persists until explicitly disabled.
+    if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+        // Disable holds on columns
+        for (int c = 0; c < COLS; ++c) {
+            gpio_hold_dis(COL_PINS[c]);
+        }
+        ESP_LOGI(TAG, "Woke from Deep Sleep!");
+    }
+
     // Wait a bit for USB Serial JTAG to stabilize before printing or doing power mgmt
     vTaskDelay(pdMS_TO_TICKS(2000));
     
