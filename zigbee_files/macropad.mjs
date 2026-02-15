@@ -112,8 +112,8 @@ const tzLocal = {
 export default {
     zigbeeModel: ['MACROPAD'],          // must match Basic cluster 'modelID'
     model: 'MACROPAD',
-    vendor: 'STARKYDIY',
-    description: 'Custom 16-button macropad (ESP32-C6)',
+    vendor: 'ORLANDOSLAB',
+    description: 'Custom 16-button macropad + encoder (ESP32-C6)',
     fromZigbee: [
         fzLocal.macropad_button_event,
         fzLocal.macropad_config,
