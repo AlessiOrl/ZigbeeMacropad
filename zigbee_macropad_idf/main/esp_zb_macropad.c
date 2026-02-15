@@ -583,6 +583,11 @@ static void button_task(void *arg)
                 // Timeout elapsed -> Go to Deep Sleep
                 ESP_LOGI(TAG, "Fake sleep timed out -> transition to Deep Sleep");
                 exit_fake_sleep(); // Clean up interrupts/GPIOs first (restores polling mode)
+                
+                // Boost frequency to ensure clean deep sleep entry
+                ESP_LOGI(TAG, "Boosting frequency...");
+                esp_rom_delay_us(50000); 
+                
                 enter_deep_sleep(); // Configures for Deep Sleep and halts
             }
 
