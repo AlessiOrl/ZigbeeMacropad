@@ -3,9 +3,18 @@
 // Custom converter for your ESP32-C6 MACROPAD
 // Decodes 'raw' frames on cluster manuSpecificAssaDoorLock into an "action" field.
 
-import {presets as e} from 'zigbee-herdsman-converters/lib/exposes';
+import {presets as e, access as ea} from 'zigbee-herdsman-converters/lib/exposes';
 
 const fzLocal = {
+    macropad_config: {
+        cluster: 'manuSpecificAssaDoorLock',
+        type: ['attributeReport', 'readResponse'],
+        convert: (model, msg, publish, options, meta) => {
+            if (msg.data.hasOwnProperty('1')) {
+                return { deep_sleep_timeout: msg.data['1'] };
+            }
+        },
+    },
     macropad_button_event: {
         // Matches your logs:
         // type 'raw', cluster 'manuSpecificAssaDoorLock'
@@ -86,6 +95,20 @@ const fzLocal = {
     },
 };
 
+const tzLocal = {
+    macropad_config: {
+        key: ['deep_sleep_timeout'],
+        convertSet: async (entity, key, value, meta) => {
+            // Attribute 1, type U32 (0x23)
+            await entity.write('manuSpecificAssaDoorLock', {1: {value, type: 0x23}});
+            return { state: { deep_sleep_timeout: value } };
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read('manuSpecificAssaDoorLock', [1]);
+        },
+    },
+};
+
 export default {
     zigbeeModel: ['MACROPAD'],          // must match Basic cluster 'modelID'
     model: 'MACROPAD',
@@ -93,9 +116,13 @@ export default {
     description: 'Custom 16-button macropad (ESP32-C6)',
     fromZigbee: [
         fzLocal.macropad_button_event,
+        fzLocal.macropad_config,
     ],
-    toZigbee: [],
+    toZigbee: [
+        tzLocal.macropad_config,
+    ],
     exposes: [
+        e.numeric('deep_sleep_timeout', ea.ALL).withDescription('Deep sleep timeout in seconds').withValueMin(0).withValueMax(86400),
         e.action([
             'button_0_single', 'button_1_single', 'button_2_single', 'button_3_single',
             'button_4_single', 'button_5_single', 'button_6_single', 'button_7_single',

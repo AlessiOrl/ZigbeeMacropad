@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -20,8 +21,13 @@
 // Set to 1 to enable external antenna (XIAO ESP32C6), 0 for internal
 #define USE_EXTERNAL_ANTENNA 1
 
-#define FAKE_SLEEP_TIMEOUT_MS 30000 
-#define DEEP_SLEEP_TIMEOUT_MS (6 * 60 * 60 * 1000ULL) // 6 Hours
+#define FAKE_SLEEP_TIMEOUT_MS 10000 
+//#define DEEP_SLEEP_TIMEOUT_MS (6 * 60 * 60 * 1000ULL) // 6 Hours
+#define DEEP_SLEEP_TIMEOUT_MS (5 * 60 * 1000ULL) // 5 Minutes (for testing)
+
+#define MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT 0x0001
+static uint32_t g_deep_sleep_timeout_sec = 1800; // 30 min default
+
 
 /* --- PINS --------------------------------------------------------------- */
 #define ROWS 4
@@ -552,7 +558,7 @@ static void button_task(void *arg)
         // INACTIVITY CHECK -> DEEP SLEEP (Priority over fake sleep)
         // -----------------------------------------------------------
         uint64_t idle_us = now - g_last_activity_time_us;
-        uint64_t deep_sleep_us = DEEP_SLEEP_TIMEOUT_MS * 1000ULL;
+        uint64_t deep_sleep_us = (uint64_t)g_deep_sleep_timeout_sec * 1000000ULL;
 
         if (idle_us > deep_sleep_us) {
             enter_deep_sleep();
@@ -688,6 +694,32 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *sig)
 /* ======================================================================= */
 /*                       ZIGBEE STACK TASK (manual Level Control)          */
 /* ======================================================================= */
+static void load_settings(void)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err == ESP_OK) {
+        uint32_t val = 0;
+        err = nvs_get_u32(my_handle, "sleep_timeout", &val);
+        if (err == ESP_OK) {
+            g_deep_sleep_timeout_sec = val;
+            ESP_LOGI(TAG, "Loaded sleep timeout: %lu sec", (unsigned long)val);
+        }
+        nvs_close(my_handle);
+    }
+}
+
+static void save_settings(void)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err == ESP_OK) {
+        nvs_set_u32(my_handle, "sleep_timeout", g_deep_sleep_timeout_sec);
+        nvs_commit(my_handle);
+        nvs_close(my_handle);
+    }
+}
+
 static void esp_zb_task(void *pv)
 {
     /*---------------------------------------------------------------
@@ -737,8 +769,17 @@ static void esp_zb_task(void *pv)
     /*---------------------------------------------------------------
      * CUSTOM MACROPAD CLUSTER 
      *-------------------------------------------------------------*/
+    load_settings();
     esp_zb_attribute_list_t *macropad_cluster =
     esp_zb_zcl_attr_list_create(MACROPAD_CLUSTER_ID);
+
+    esp_zb_custom_cluster_add_custom_attr(
+        macropad_cluster,
+        MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT,
+        ESP_ZB_ZCL_ATTR_TYPE_U32,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+        &g_deep_sleep_timeout_sec
+    );
 
     /*---------------------------------------------------------------
      * CLUSTER LIST (Basic + Identify + Macropad)
@@ -818,7 +859,13 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
         break;
 
     case MACROPAD_CLUSTER_ID:
-        /* No writable attributes (button events are sent as custom commands). */
+        if (attr_id == MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT) {
+            if (message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U32 && message->attribute.data.value) {
+                g_deep_sleep_timeout_sec = *(uint32_t*)message->attribute.data.value;
+                ESP_LOGI(TAG, "New Deep Sleep Timeout: %lu s", (unsigned long)g_deep_sleep_timeout_sec);
+                save_settings();
+            }
+        }
         break;
     
     default:
