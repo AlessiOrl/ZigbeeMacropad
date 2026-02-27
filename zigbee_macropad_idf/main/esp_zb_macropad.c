@@ -22,8 +22,6 @@
 #define USE_EXTERNAL_ANTENNA 1
 
 #define FAKE_SLEEP_TIMEOUT_MS 10000 
-//#define DEEP_SLEEP_TIMEOUT_MS (6 * 60 * 60 * 1000ULL) // 6 Hours
-#define DEEP_SLEEP_TIMEOUT_MS (5 * 60 * 1000ULL) // 5 Minutes (for testing)
 
 #define MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT 0x0001
 static uint32_t g_deep_sleep_timeout_sec = 1800; // 30 min default
