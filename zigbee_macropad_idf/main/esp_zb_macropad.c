@@ -19,7 +19,7 @@
 #define TAG                 "MACROPAD"
 
 // Set to 1 to enable external antenna (XIAO ESP32C6), 0 for internal
-#define USE_EXTERNAL_ANTENNA 1
+#define USE_EXTERNAL_ANTENNA 0
 
 #define FAKE_SLEEP_TIMEOUT_MS 10000 
 
@@ -127,7 +127,7 @@ static void IRAM_ATTR wakeup_isr(void *arg) {
 
 static void enter_deep_sleep(void)
 {
-    ESP_LOGI(TAG, "Entering deep sleep (6h inactivity)...");
+    ESP_LOGI(TAG, "Entering deep sleep (%lu sec inactivity)...", (unsigned long)g_deep_sleep_timeout_sec);
 
     // 1. Drive all columns LOW and HOLD them
     for (int c = 0; c < COLS; ++c) {
@@ -259,10 +259,11 @@ static void zb_reset_and_steer_cb(void)
     ESP_LOGW(TAG, "Factory reset: clearing Zigbee NVS and restarting commissioning...");
     g_is_joined = false;
 
-    esp_zb_factory_reset();
+    esp_zb_factory_reset(); 
 
-    /* Start network steering shortly after */
-    esp_zb_scheduler_alarm(start_network_steering, 0, 1500);
+    /* Start network steering shortly after factory reset completes via signal handlers, 
+       but also schedule a fallback just in case */
+    esp_zb_scheduler_alarm(start_network_steering, 0, 3000);
 }
 
 /* ======================================================================= */
@@ -566,7 +567,10 @@ static void button_task(void *arg)
         // -----------------------------------------------------------
         // INACTIVITY CHECK -> FAKE SLEEP
         // -----------------------------------------------------------
-        if (idle_us > (FAKE_SLEEP_TIMEOUT_MS * 1000ULL)) {
+        // Use a longer timeout (e.g. 60s) if not joined to allow network steering/joining
+        uint64_t sleep_timeout_us = (g_is_joined ? FAKE_SLEEP_TIMEOUT_MS : 60000) * 1000ULL;
+
+        if (idle_us > sleep_timeout_us) {
             // Enter lower power mode
             enter_fake_sleep();
 
