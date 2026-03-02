@@ -24,7 +24,7 @@
 #define FAKE_SLEEP_TIMEOUT_MS 10000 
 
 #define MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT 0x0001
-static uint32_t g_deep_sleep_timeout_sec = 1800; // 30 min default
+static uint32_t g_deep_sleep_timeout_sec = 1800; // 30 min default, 0 = deep sleep disabled
 
 
 /* --- PINS --------------------------------------------------------------- */
@@ -559,7 +559,7 @@ static void button_task(void *arg)
         uint64_t idle_us = now - g_last_activity_time_us;
         uint64_t deep_sleep_us = (uint64_t)g_deep_sleep_timeout_sec * 1000000ULL;
 
-        if (idle_us > deep_sleep_us) {
+        if (g_deep_sleep_timeout_sec > 0 && idle_us > deep_sleep_us) {
             enter_deep_sleep();
             // Function does not return
         }
@@ -574,11 +574,17 @@ static void button_task(void *arg)
             // Enter lower power mode
             enter_fake_sleep();
 
-            // Calculate time remaining until deep sleep
-            uint64_t time_left_us = (deep_sleep_us > idle_us) ? (deep_sleep_us - idle_us) : 0;
-            // Convert to ticks, ensure it fits in TickType_t. 
-            // 6h is ~21.6M ms, fits in uint32_t even at 1000Hz tick rate.
-            TickType_t wait_ticks = pdMS_TO_TICKS(time_left_us / 1000);
+            // Calculate time remaining until deep sleep (or wait forever if timeout=0)
+            TickType_t wait_ticks;
+            if (g_deep_sleep_timeout_sec > 0) {
+                uint64_t time_left_us = (deep_sleep_us > idle_us) ? (deep_sleep_us - idle_us) : 0;
+                // Convert to ticks, ensure it fits in TickType_t.
+                // 6h is ~21.6M ms, fits in uint32_t even at 1000Hz tick rate.
+                wait_ticks = pdMS_TO_TICKS(time_left_us / 1000);
+            } else {
+                // Deep sleep disabled (timeout=0): stay in fake sleep indefinitely until key press
+                wait_ticks = portMAX_DELAY;
+            }
 
             // Wait for wakeup signal OR timeout (transition to deep sleep)
             if (xSemaphoreTake(s_wakeup_sem, wait_ticks) == pdFALSE) {
@@ -710,7 +716,7 @@ static void load_settings(void)
         err = nvs_get_u32(my_handle, "sleep_timeout", &val);
         if (err == ESP_OK) {
             g_deep_sleep_timeout_sec = val;
-            ESP_LOGI(TAG, "Loaded sleep timeout: %lu sec", (unsigned long)val);
+            ESP_LOGI(TAG, "Loaded sleep timeout: %lu sec (0=disabled)", (unsigned long)val);
         }
         nvs_close(my_handle);
     }
@@ -869,7 +875,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
         if (attr_id == MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT) {
             if (message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U32 && message->attribute.data.value) {
                 g_deep_sleep_timeout_sec = *(uint32_t*)message->attribute.data.value;
-                ESP_LOGI(TAG, "New Deep Sleep Timeout: %lu s", (unsigned long)g_deep_sleep_timeout_sec);
+                ESP_LOGI(TAG, "New Deep Sleep Timeout: %lu s (0=disabled)", (unsigned long)g_deep_sleep_timeout_sec);
                 save_settings();
             }
         }

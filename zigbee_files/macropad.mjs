@@ -122,7 +122,7 @@ export default {
         tzLocal.macropad_config,
     ],
     exposes: [
-        e.numeric('deep_sleep_timeout', ea.ALL).withDescription('Deep sleep timeout in seconds').withValueMin(0).withValueMax(86400),
+        e.numeric('deep_sleep_timeout', ea.ALL).withDescription('Deep sleep timeout in seconds (0 = disabled)').withValueMin(0).withValueMax(86400),
         e.action([
             'button_0_single', 'button_1_single', 'button_2_single', 'button_3_single',
             'button_4_single', 'button_5_single', 'button_6_single', 'button_7_single',
