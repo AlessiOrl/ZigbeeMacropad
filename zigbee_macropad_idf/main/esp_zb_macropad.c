@@ -19,12 +19,24 @@
 #define TAG                 "MACROPAD"
 
 // Set to 1 to enable external antenna (XIAO ESP32C6), 0 for internal
-#define USE_EXTERNAL_ANTENNA 0
+#define USE_EXTERNAL_ANTENNA 1
 
 #define FAKE_SLEEP_TIMEOUT_MS 10000 
 
 #define MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT 0x0001
-static uint32_t g_deep_sleep_timeout_sec = 1800; // 30 min default, 0 = deep sleep disabled
+#define MACROPAD_ATTR_DOUBLE_CLICK_MS    0x0002
+#define MACROPAD_ATTR_HOLD_PRESS_MS      0x0003
+#define MACROPAD_ATTR_ENC_REPORT_MS      0x0004
+
+#define DEEP_SLEEP_TIMEOUT_DEFAULT_SEC   1800
+#define DOUBLE_CLICK_MS_DEFAULT          250
+#define HOLD_PRESS_MS_DEFAULT            1000
+#define ENC_REPORT_INTERVAL_MS_DEFAULT   60
+
+static uint32_t g_deep_sleep_timeout_sec = DEEP_SLEEP_TIMEOUT_DEFAULT_SEC; // 30 min default, 0 = deep sleep disabled
+static uint32_t g_double_click_ms = DOUBLE_CLICK_MS_DEFAULT;
+static uint32_t g_hold_press_ms = HOLD_PRESS_MS_DEFAULT;
+static uint32_t g_enc_report_interval_ms = ENC_REPORT_INTERVAL_MS_DEFAULT;
 
 
 /* --- PINS --------------------------------------------------------------- */
@@ -48,7 +60,6 @@ static uint32_t g_deep_sleep_timeout_sec = 1800; // 30 min default, 0 = deep sle
 #define ENC_STEPS_PER_DETENT 4
 
 // Throttle how often we publish Zigbee rotate events.
-#define ENC_REPORT_INTERVAL_MS 60
 
 // Row input pins
 static const gpio_num_t ROW_PINS[ROWS] = {
@@ -66,8 +77,6 @@ static const gpio_num_t COL_PINS[COLS] = {
 /* --- Timing (ms) for local keypad -------------------------------------- */
 #define BTN_POLL_INTERVAL_MS   10
 #define DEBOUNCE_MS        15
-#define DOUBLE_CLICK_MS   400
-#define HOLD_PRESS_MS    1000
 // Encoder switch: use ultra-long press to enter pairing mode.
 #define ENC_ULTRA_PRESS_MS 6000
 
@@ -332,8 +341,6 @@ static void encoder_task(void *arg)
 {
     (void)arg;
 
-    const uint64_t report_interval_us = ENC_REPORT_INTERVAL_MS * 1000ULL;
-
     uint32_t dummy;
     uint8_t prev = enc_read_state();
     int32_t edge_acc = 0;
@@ -343,8 +350,11 @@ static void encoder_task(void *arg)
     update_activity();
 
     while (true) {
+        const uint32_t report_interval_ms = g_enc_report_interval_ms;
+        const uint64_t report_interval_us = (uint64_t)report_interval_ms * 1000ULL;
+
         // Wait for edges; also periodically flush accumulated detents.
-        const BaseType_t got = xQueueReceive(s_enc_evt_q, &dummy, pdMS_TO_TICKS(ENC_REPORT_INTERVAL_MS));
+        const BaseType_t got = xQueueReceive(s_enc_evt_q, &dummy, pdMS_TO_TICKS(report_interval_ms));
         const uint64_t now = now_us();
 
         if (got) {
@@ -542,8 +552,6 @@ static void button_task(void *arg)
 {
     
     const uint64_t debounce_us      = DEBOUNCE_MS * 1000ULL;
-    const uint64_t double_click_us  = DOUBLE_CLICK_MS * 1000ULL;
-    const uint64_t long_press_us    = HOLD_PRESS_MS * 1000ULL;
     const uint64_t enc_ultra_us     = ENC_ULTRA_PRESS_MS * 1000ULL;
 
     bool raw_states[BTN_COUNT];
@@ -552,6 +560,8 @@ static void button_task(void *arg)
 
     while (true) {
         uint64_t now = now_us();
+        const uint64_t double_click_us  = (uint64_t)g_double_click_ms * 1000ULL;
+        const uint64_t long_press_us    = (uint64_t)g_hold_press_ms * 1000ULL;
 
         // -----------------------------------------------------------
         // INACTIVITY CHECK -> DEEP SLEEP (Priority over fake sleep)
@@ -718,6 +728,28 @@ static void load_settings(void)
             g_deep_sleep_timeout_sec = val;
             ESP_LOGI(TAG, "Loaded sleep timeout: %lu sec (0=disabled)", (unsigned long)val);
         }
+
+        val = 0;
+        err = nvs_get_u32(my_handle, "double_click", &val);
+        if (err == ESP_OK) {
+            g_double_click_ms = val;
+            ESP_LOGI(TAG, "Loaded double click: %lu ms", (unsigned long)val);
+        }
+
+        val = 0;
+        err = nvs_get_u32(my_handle, "hold_press", &val);
+        if (err == ESP_OK) {
+            g_hold_press_ms = val;
+            ESP_LOGI(TAG, "Loaded hold press: %lu ms", (unsigned long)val);
+        }
+
+        val = 0;
+        err = nvs_get_u32(my_handle, "enc_report", &val);
+        if (err == ESP_OK) {
+            g_enc_report_interval_ms = val;
+            ESP_LOGI(TAG, "Loaded encoder report interval: %lu ms", (unsigned long)val);
+        }
+
         nvs_close(my_handle);
     }
 }
@@ -728,6 +760,9 @@ static void save_settings(void)
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
     if (err == ESP_OK) {
         nvs_set_u32(my_handle, "sleep_timeout", g_deep_sleep_timeout_sec);
+        nvs_set_u32(my_handle, "double_click", g_double_click_ms);
+        nvs_set_u32(my_handle, "hold_press", g_hold_press_ms);
+        nvs_set_u32(my_handle, "enc_report", g_enc_report_interval_ms);
         nvs_commit(my_handle);
         nvs_close(my_handle);
     }
@@ -792,6 +827,30 @@ static void esp_zb_task(void *pv)
         ESP_ZB_ZCL_ATTR_TYPE_U32,
         ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
         &g_deep_sleep_timeout_sec
+    );
+
+    esp_zb_custom_cluster_add_custom_attr(
+        macropad_cluster,
+        MACROPAD_ATTR_DOUBLE_CLICK_MS,
+        ESP_ZB_ZCL_ATTR_TYPE_U32,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+        &g_double_click_ms
+    );
+
+    esp_zb_custom_cluster_add_custom_attr(
+        macropad_cluster,
+        MACROPAD_ATTR_HOLD_PRESS_MS,
+        ESP_ZB_ZCL_ATTR_TYPE_U32,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+        &g_hold_press_ms
+    );
+
+    esp_zb_custom_cluster_add_custom_attr(
+        macropad_cluster,
+        MACROPAD_ATTR_ENC_REPORT_MS,
+        ESP_ZB_ZCL_ATTR_TYPE_U32,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+        &g_enc_report_interval_ms
     );
 
     /*---------------------------------------------------------------
@@ -872,10 +931,24 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
         break;
 
     case MACROPAD_CLUSTER_ID:
-        if (attr_id == MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT) {
-            if (message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U32 && message->attribute.data.value) {
-                g_deep_sleep_timeout_sec = *(uint32_t*)message->attribute.data.value;
+        if (message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U32 && message->attribute.data.value) {
+            uint32_t value = *(uint32_t *)message->attribute.data.value;
+
+            if (attr_id == MACROPAD_ATTR_DEEP_SLEEP_TIMEOUT) {
+                g_deep_sleep_timeout_sec = value;
                 ESP_LOGI(TAG, "New Deep Sleep Timeout: %lu s (0=disabled)", (unsigned long)g_deep_sleep_timeout_sec);
+                save_settings();
+            } else if (attr_id == MACROPAD_ATTR_DOUBLE_CLICK_MS) {
+                g_double_click_ms = value;
+                ESP_LOGI(TAG, "New Double Click: %lu ms", (unsigned long)g_double_click_ms);
+                save_settings();
+            } else if (attr_id == MACROPAD_ATTR_HOLD_PRESS_MS) {
+                g_hold_press_ms = value;
+                ESP_LOGI(TAG, "New Hold Press: %lu ms", (unsigned long)g_hold_press_ms);
+                save_settings();
+            } else if (attr_id == MACROPAD_ATTR_ENC_REPORT_MS) {
+                g_enc_report_interval_ms = value;
+                ESP_LOGI(TAG, "New Encoder Report Interval: %lu ms", (unsigned long)g_enc_report_interval_ms);
                 save_settings();
             }
         }
