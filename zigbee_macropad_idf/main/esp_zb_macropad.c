@@ -396,9 +396,6 @@ static void encoder_task(void *arg)
     }
 }
 
-/* ======================================================================= */
-/*                     LOCAL FEEDBACK (color fixed)                        */
-/* ======================================================================= */
 static const char* action_str(action_t a) {
     return (a==ACT_SINGLE) ? "single" : (a==ACT_DOUBLE) ? "double" : "hold";
 }
