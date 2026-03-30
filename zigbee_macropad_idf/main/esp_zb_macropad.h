@@ -25,7 +25,7 @@
 #define ESP_ZB_PRIMARY_CHANNEL_MASK       ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK  /* Allow all channels */
 
 /* --- Manufacturer information --- */
-#define ESP_MANUFACTURER_NAME  "\x09""STARKYDIY"    /* Custom manufacturer name */
+#define ESP_MANUFACTURER_NAME  "\x0B""OrlandosLab"  /* Custom manufacturer name */
 #define ESP_MODEL_IDENTIFIER   "\x08""MACROPAD"     /* Model identifier */
 
 /* --- Zigbee device configuration macros --- */
