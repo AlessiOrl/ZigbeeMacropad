@@ -1198,8 +1198,6 @@ static void macropad_send_encoder_rotate(bool clockwise, uint8_t steps)
                             ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
                             &g_encoder_input_cfg.present_value);
     macropad_report_attr(ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID);
-    macropad_report_attr(MACROPAD_CLUSTER_ID, MACROPAD_ATTR_ENCODER_EVENT);
-    macropad_send_custom_encoder_rotate(clockwise, steps);
 }
 
 /* ======================================================================= */

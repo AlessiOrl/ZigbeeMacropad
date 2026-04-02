@@ -15,6 +15,7 @@ const ATTR_BUTTON_EVENT = 0x0010;
 const ATTR_ENCODER_EVENT = 0x0011;
 const BUTTON_EVENT_STRIDE = 16;
 const BUTTON_EVENT_ANALOG_BASE = 1000;
+const MAX_BUTTON_ID = 16;
 
 function decodeButtonAction(actionType) {
     if (actionType === 1) return 'single';
@@ -33,7 +34,7 @@ function decodeStandardButtonValue(value) {
     const actionType = numeric % BUTTON_EVENT_STRIDE;
     const actionStr = decodeButtonAction(actionType);
 
-    if (buttonId < 0 || buttonId > 15 || !actionStr) {
+    if (buttonId < 0 || buttonId > MAX_BUTTON_ID || !actionStr) {
         return null;
     }
 
@@ -150,15 +151,10 @@ const fzLocal = {
             }
 
             if (cmdId === 1) {
-                const direction = raw[3] ?? 0;
-                const steps = raw[4] ?? 1;
-                const action = (direction === 1) ? 'encoder_right' : 'encoder_left';
-
-                return {
-                    action,
-                    steps,
-                    direction,
-                };
+                // Encoder rotation is decoded from genAnalogInput reports.
+                // Ignoring the legacy raw custom command prevents duplicate
+                // action events when older firmware is still sending both.
+                return {};
             }
 
             return {};
@@ -271,15 +267,15 @@ export default {
             'button_0_single', 'button_1_single', 'button_2_single', 'button_3_single',
             'button_4_single', 'button_5_single', 'button_6_single', 'button_7_single',
             'button_8_single', 'button_9_single', 'button_10_single', 'button_11_single',
-            'button_12_single', 'button_13_single', 'button_14_single', 'button_15_single',
+            'button_12_single', 'button_13_single', 'button_14_single', 'button_15_single', 'button_16_single',
             'button_0_double', 'button_1_double', 'button_2_double', 'button_3_double',
             'button_4_double', 'button_5_double', 'button_6_double', 'button_7_double',
             'button_8_double', 'button_9_double', 'button_10_double', 'button_11_double',
-            'button_12_double', 'button_13_double', 'button_14_double', 'button_15_double',
+            'button_12_double', 'button_13_double', 'button_14_double', 'button_15_double', 'button_16_double',
             'button_0_hold', 'button_1_hold', 'button_2_hold', 'button_3_hold',
             'button_4_hold', 'button_5_hold', 'button_6_hold', 'button_7_hold',
             'button_8_hold', 'button_9_hold', 'button_10_hold', 'button_11_hold',
-            'button_12_hold', 'button_13_hold', 'button_14_hold', 'button_15_hold',
+            'button_12_hold', 'button_13_hold', 'button_14_hold', 'button_15_hold', 'button_16_hold',
             'encoder_left', 'encoder_right',
         ]),
     ],

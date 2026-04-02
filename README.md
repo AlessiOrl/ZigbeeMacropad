@@ -123,7 +123,7 @@ Ensure all diodes are correctly oriented (cathode to column).
 Double check the Encoder wiring (A, B, Switch, GND).
 
 ### 🔧 4. Flash the Firmware
-1. Install **ESP-IDF v5.3.4** (or newer).  
+1. Install **ESP-IDF v5.5.2** (or newer).  
 2. Clone or copy the project to your workspace.  
 3. Build and flash:
    ```bash
@@ -165,6 +165,16 @@ Then:
 - `button_0_hold` ... `button_15_hold`
 - `encoder_left`
 - `encoder_right`
+
+### Smooth encoder dimming
+For rotary dimming, the limiting factor is Zigbee traffic volume, not the encoder itself. The firmware now publishes encoder rotation through a single `genAnalogInput` report per interval instead of duplicating the same event through multiple clusters/commands.
+
+Recommended setup:
+1. Keep `enc_report_interval_ms` around `60-75` ms. Lower values create more network traffic and tend to make lights jitter under fast rotation.
+2. Use the reported `steps` value as a relative brightness delta in your automation instead of applying a fixed `1`-step change per message.
+3. If you want the smoothest possible dimmer, move brightness control into Zigbee itself by sending `Level Control` commands directly to a bound light or group from the macropad. That removes Zigbee2MQTT and Home Assistant automation latency from the control loop.
+
+For the current Zigbee2MQTT action-based flow, prefer batching more detents per report over sending every encoder edge individually.
 
 ### Troubleshooting
 If the device joins but exposes don't appear:
