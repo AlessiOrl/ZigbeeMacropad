@@ -350,7 +350,8 @@ static int8_t enc_quadrature_delta(uint8_t prev, uint8_t curr)
         -1,  0,   0, +1,
         0,  +1,  -1,  0,
     };
-    return table[((prev & 0x3) << 2) | (curr & 0x3)];
+    const int8_t delta = table[((prev & 0x3) << 2) | (curr & 0x3)];
+    return ENC_DIRECTION_INVERTED ? (int8_t)(-delta) : delta;
 }
 
 static uint8_t enc_read_state(void)

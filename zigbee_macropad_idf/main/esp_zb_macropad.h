@@ -28,6 +28,9 @@
 #define ESP_MANUFACTURER_NAME  "\x0B""OrlandosLab"  /* Custom manufacturer name */
 #define ESP_MODEL_IDENTIFIER   "\x08""MACROPAD"     /* Model identifier */
 
+/* Set to 1 when encoder A/B wiring is swapped and rotation must be inverted in software. */
+#define ENC_DIRECTION_INVERTED         1
+
 /* --- Zigbee device configuration macros --- */
 #define ESP_ZB_ZR_CONFIG()                                      \
     {                                                           \
