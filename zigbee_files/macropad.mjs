@@ -11,6 +11,55 @@ const ATTR_DEEP_SLEEP = 0x0001;
 const ATTR_DOUBLE_CLICK = 0x0002;
 const ATTR_HOLD_PRESS = 0x0003;
 const ATTR_ENC_REPORT_INTERVAL = 0x0004;
+const ATTR_BUTTON_EVENT = 0x0010;
+const ATTR_ENCODER_EVENT = 0x0011;
+const BUTTON_EVENT_STRIDE = 16;
+const BUTTON_EVENT_ANALOG_BASE = 1000;
+
+function decodeButtonAction(actionType) {
+    if (actionType === 1) return 'single';
+    if (actionType === 2) return 'double';
+    if (actionType === 3) return 'hold';
+    return null;
+}
+
+function decodeStandardButtonValue(value) {
+    const numeric = Math.round(Number(value));
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        return null;
+    }
+
+    const buttonId = Math.floor(numeric / BUTTON_EVENT_STRIDE);
+    const actionType = numeric % BUTTON_EVENT_STRIDE;
+    const actionStr = decodeButtonAction(actionType);
+
+    if (buttonId < 0 || buttonId > 15 || !actionStr) {
+        return null;
+    }
+
+    return {
+        action: `button_${buttonId}_${actionStr}`,
+        button: buttonId,
+        action_type: actionStr,
+    };
+}
+
+function decodeEncoderValue(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric === 0) {
+        return null;
+    }
+
+    return {
+        action: numeric > 0 ? 'encoder_right' : 'encoder_left',
+        steps: Math.max(1, Math.round(Math.abs(numeric))),
+        direction: numeric > 0 ? 1 : 0,
+    };
+}
+
+function getStandardPresentValue(data) {
+    return data?.presentValue ?? data?.[85] ?? data?.['85'] ?? data?.['presentValue'];
+}
 
 const RANGES = {
     deep_sleep_timeout: {min: 0, max: 86400},
@@ -77,9 +126,6 @@ const fzLocal = {
             }
 
             if (!Array.isArray(raw) || raw.length < 3) {
-                meta.logger.debug(
-                    `MACROPAD: raw converter got unsupported msg.data = ${JSON.stringify(msg.data)}`
-                );
                 return {};
             }
 
@@ -96,10 +142,6 @@ const fzLocal = {
 
                 const action = `button_${buttonId}_${actionStr}`;
 
-                meta.logger.info(
-                    `MACROPAD: decoded raw=${JSON.stringify(raw)} -> action=${action}`
-                );
-
                 return {
                     action,
                     button: buttonId,
@@ -112,10 +154,6 @@ const fzLocal = {
                 const steps = raw[4] ?? 1;
                 const action = (direction === 1) ? 'encoder_right' : 'encoder_left';
 
-                meta.logger.info(
-                    `MACROPAD: decoded raw=${JSON.stringify(raw)} -> action=${action} steps=${steps}`
-                );
-
                 return {
                     action,
                     steps,
@@ -123,10 +161,42 @@ const fzLocal = {
                 };
             }
 
-            meta.logger.debug(
-                `MACROPAD: unknown cmdId=${cmdId} raw=${JSON.stringify(raw)}`
-            );
             return {};
+        },
+    },
+    macropad_standard_button_event: {
+        cluster: 'genMultistateInput',
+        type: ['attributeReport', 'readResponse'],
+        convert: (model, msg, publish, options, meta) => {
+            const value = getStandardPresentValue(msg.data);
+            if (value === undefined) {
+                return;
+            }
+
+            return decodeStandardButtonValue(value) || undefined;
+        },
+    },
+    macropad_standard_encoder_event: {
+        cluster: 'genAnalogInput',
+        type: ['attributeReport', 'readResponse'],
+        convert: (model, msg, publish, options, meta) => {
+            const value = getStandardPresentValue(msg.data);
+            if (value === undefined) {
+                return;
+            }
+
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric) || numeric === 0) {
+                return;
+            }
+
+            let payload;
+            if (numeric >= BUTTON_EVENT_ANALOG_BASE) {
+                payload = decodeStandardButtonValue(numeric - BUTTON_EVENT_ANALOG_BASE) || undefined;
+            } else {
+                payload = decodeEncoderValue(numeric) || undefined;
+            }
+            return payload;
         },
     },
 };
@@ -166,16 +236,26 @@ export default {
     description: 'Custom 16-button macropad + encoder (ESP32-C6)',
     extend: [
         // Register cluster ID only; leave attributes and commands empty so that:
-        // - Button/encoder frames arrive as 'raw' (not parsed into typed commands)
-        // - Attribute writes use numeric IDs (bypasses herdsman's writable check)
+        // - Button/encoder frames can still arrive as 'raw' if sent as custom commands
+        // - Attribute reports can be decoded because the custom attribute schema is known
+        // - Attribute writes still use numeric IDs from tzLocal
         deviceAddCustomCluster(MACROPAD_CLUSTER, {
             ID: MACROPAD_CLUSTER_ID,
-            attributes: {},
+            attributes: {
+                deepSleepTimeout: {ID: ATTR_DEEP_SLEEP, type: Zcl.DataType.UINT32},
+                doubleClickMs: {ID: ATTR_DOUBLE_CLICK, type: Zcl.DataType.UINT32},
+                holdPressMs: {ID: ATTR_HOLD_PRESS, type: Zcl.DataType.UINT32},
+                encReportIntervalMs: {ID: ATTR_ENC_REPORT_INTERVAL, type: Zcl.DataType.UINT32},
+                buttonEvent: {ID: ATTR_BUTTON_EVENT, type: Zcl.DataType.UINT16},
+                encoderEvent: {ID: ATTR_ENCODER_EVENT, type: Zcl.DataType.UINT16},
+            },
             commands: {},
             commandsResponse: {},
         }),
     ],
     fromZigbee: [
+        fzLocal.macropad_standard_button_event,
+        fzLocal.macropad_standard_encoder_event,
         fzLocal.macropad_button_event,
         fzLocal.macropad_config,
     ],

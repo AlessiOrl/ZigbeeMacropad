@@ -27,16 +27,32 @@
 #define MACROPAD_ATTR_DOUBLE_CLICK_MS    0x0002
 #define MACROPAD_ATTR_HOLD_PRESS_MS      0x0003
 #define MACROPAD_ATTR_ENC_REPORT_MS      0x0004
+#define MACROPAD_ATTR_BUTTON_EVENT       0x0010
+#define MACROPAD_ATTR_ENCODER_EVENT      0x0011
 
 #define DEEP_SLEEP_TIMEOUT_DEFAULT_SEC   1800
 #define DOUBLE_CLICK_MS_DEFAULT          250
 #define HOLD_PRESS_MS_DEFAULT            1000
 #define ENC_REPORT_INTERVAL_MS_DEFAULT   60
+#define BUTTON_EVENT_ANALOG_BASE         1000.0f
 
 static uint32_t g_deep_sleep_timeout_sec = DEEP_SLEEP_TIMEOUT_DEFAULT_SEC; // 30 min default, 0 = deep sleep disabled
 static uint32_t g_double_click_ms = DOUBLE_CLICK_MS_DEFAULT;
 static uint32_t g_hold_press_ms = HOLD_PRESS_MS_DEFAULT;
 static uint32_t g_enc_report_interval_ms = ENC_REPORT_INTERVAL_MS_DEFAULT;
+static uint16_t g_last_button_event = 0;
+static uint16_t g_last_encoder_event = 0;
+static esp_zb_multistate_input_cluster_cfg_t g_button_input_cfg = {
+    .number_of_states = 256,
+    .out_of_service = false,
+    .present_value = 0,
+    .status_flags = 0,
+};
+static esp_zb_analog_input_cluster_cfg_t g_encoder_input_cfg = {
+    .out_of_service = false,
+    .present_value = 0,
+    .status_flags = 0,
+};
 
 
 /* --- PINS --------------------------------------------------------------- */
@@ -217,11 +233,18 @@ static void zb_reset_and_steer_cb(void);
 /* Prototypes */
 static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message);
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message);
+static void zb_cmd_send_status_handler(esp_zb_zcl_command_send_status_message_t message);
+static void zb_default_resp_handler(const esp_zb_zcl_cmd_default_resp_message_t *message);
 
 /* Public helper to send a button event (call this from your key matrix code) */
 void macropad_send_button_event(uint8_t button_id, action_t action);
 
 static void macropad_send_encoder_rotate(bool clockwise, uint8_t steps);
+static void macropad_report_attr(uint16_t cluster_id, uint16_t attr_id);
+static void macropad_send_custom_button_event(uint8_t button_id, action_t action);
+static void macropad_send_custom_encoder_rotate(bool clockwise, uint8_t steps);
+static float macropad_encode_button_present_value(uint8_t button_id, action_t action);
+static void macropad_set_local_attr(uint16_t cluster_id, uint16_t attr_id, void *value);
 
 /* ======================================================================= */
 /*                          INIT GPIO                                      */
@@ -307,7 +330,7 @@ static void boot_button_task(void *arg) {
             if (g_zb_ready) {
                 esp_zb_scheduler_alarm((esp_zb_callback_t)zb_reset_and_steer_cb, 0, 0);
             } else {
-                ESP_LOGW(TAG, "Zigbee not ready; ignoring button press");
+                ESP_LOGW(TAG, "Pairing button ignored while Zigbee is not ready");
             }
         }
     }
@@ -345,7 +368,7 @@ static void encoder_task(void *arg)
     uint8_t prev = enc_read_state();
     int32_t edge_acc = 0;
     int32_t detent_acc = 0;
-    uint64_t last_report_us = now_us();
+    uint64_t last_report_us = 0;
     
     update_activity();
 
@@ -375,7 +398,12 @@ static void encoder_task(void *arg)
             }
         }
 
-        if (detent_acc != 0 && (now - last_report_us) >= report_interval_us) {
+        bool should_publish = false;
+        if (detent_acc != 0) {
+            should_publish = (last_report_us == 0) || ((now - last_report_us) >= report_interval_us);
+        }
+
+        if (should_publish) {
             // Only publish when joined; keep the input responsive regardless.
             if (g_is_joined) {
                 const bool clockwise = (detent_acc > 0);
@@ -659,7 +687,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *sig)
     case ESP_ZB_ZDO_SIGNAL_PRODUCTION_CONFIG_READY:
         // ESP_FAIL here only means "no production config found" (normal for non-manufacturing builds).
         // Don't treat it as fatal.
-        ESP_LOGI(TAG, "Production config ready status: %s", esp_err_to_name(err_status));
+        ESP_LOGD(TAG, "Production config status: %s", esp_err_to_name(err_status));
         break;
 
     case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
@@ -704,7 +732,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *sig)
         break;
 
     default:
-        ESP_LOGI(TAG, "ZDO signal: %s (0x%x) status: %s",
+        ESP_LOGD(TAG, "ZDO signal: %s (0x%x) status: %s",
                  esp_zb_zdo_signal_to_string(sig_type),
                  sig_type, esp_err_to_name(err_status));
         break;
@@ -850,8 +878,29 @@ static void esp_zb_task(void *pv)
         &g_enc_report_interval_ms
     );
 
+    esp_zb_custom_cluster_add_custom_attr(
+        macropad_cluster,
+        MACROPAD_ATTR_BUTTON_EVENT,
+        ESP_ZB_ZCL_ATTR_TYPE_U16,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+        &g_last_button_event
+    );
+
+    esp_zb_custom_cluster_add_custom_attr(
+        macropad_cluster,
+        MACROPAD_ATTR_ENCODER_EVENT,
+        ESP_ZB_ZCL_ATTR_TYPE_U16,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+        &g_last_encoder_event
+    );
+
+    esp_zb_attribute_list_t *button_input_cluster =
+        esp_zb_multistate_input_cluster_create(&g_button_input_cfg);
+    esp_zb_attribute_list_t *encoder_input_cluster =
+        esp_zb_analog_input_cluster_create(&g_encoder_input_cfg);
+
     /*---------------------------------------------------------------
-     * CLUSTER LIST (Basic + Identify + Macropad)
+     * CLUSTER LIST (Basic + Identify + Macropad + Standard event inputs)
      *-------------------------------------------------------------*/
     esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
     ESP_ERROR_CHECK(cluster_list ? ESP_OK : ESP_FAIL);
@@ -867,6 +916,14 @@ static void esp_zb_task(void *pv)
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_custom_cluster( cluster_list,
                                                             macropad_cluster,
                                                             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_multistate_input_cluster(cluster_list,
+                                                                     button_input_cluster,
+                                                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_analog_input_cluster(cluster_list,
+                                                                 encoder_input_cluster,
+                                                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
 
     /*---------------------------------------------------------------
      * ENDPOINT CONFIGURATION
@@ -889,6 +946,7 @@ static void esp_zb_task(void *pv)
 
     /* 3. Register Zigbee core action handler (for attribute writes, custom commands, etc.) */
     esp_zb_core_action_handler_register(zb_action_handler);
+    esp_zb_zcl_command_send_status_handler_register(zb_cmd_send_status_handler);
     
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
@@ -915,7 +973,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
     uint16_t cluster_id = message->info.cluster;
     uint16_t attr_id    = message->attribute.id;
 
-    ESP_LOGI(TAG,
+    ESP_LOGD(TAG,
              "set_attr: ep=%u cluster=0x%04X attr=0x%04X size=%d",
              endpoint,
              cluster_id,
@@ -969,72 +1027,179 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             (const esp_zb_zcl_set_attr_value_message_t *)message);
         break;
 
+    case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:
+        zb_default_resp_handler((const esp_zb_zcl_cmd_default_resp_message_t *)message);
+        break;
+
     /* You can add more cases later:
      *  - ESP_ZB_CORE_REPORT_ATTR_CB_ID
      *  - ESP_ZB_CORE_CMD_CUSTOM_CLUSTER_REQ_CB_ID
      *  etc.
      */
     default:
-        ESP_LOGW(TAG, "Unhandled Zigbee action 0x%x", callback_id);
+        ESP_LOGD(TAG, "Ignored Zigbee action 0x%x", callback_id);
         break;
     }
 
     return ret;
 }
 
-void macropad_send_button_event(uint8_t button_id, action_t action)
+static void zb_default_resp_handler(const esp_zb_zcl_cmd_default_resp_message_t *message)
 {
-    uint8_t payload[2] = { button_id, (uint8_t)action};
+    if (!message) {
+        return;
+    }
 
+    if (message->status_code != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGW(TAG,
+                 "ZCL default response cluster=0x%04X cmd=0x%02X status=0x%02X src_ep=%u dst_ep=%u",
+                 message->info.cluster,
+                 message->resp_to_cmd,
+                 message->status_code,
+                 message->info.src_endpoint,
+                 message->info.dst_endpoint);
+    }
+}
+
+static void zb_cmd_send_status_handler(esp_zb_zcl_command_send_status_message_t message)
+{
+    if (message.status != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "ZCL send failed: %s tsn=%u dst=0x%04X dst_ep=%u src_ep=%u",
+                 esp_err_to_name(message.status),
+                 message.tsn,
+                 message.dst_addr.u.short_addr,
+                 message.dst_endpoint,
+                 message.src_endpoint);
+    }
+}
+
+static void macropad_report_attr(uint16_t cluster_id, uint16_t attr_id)
+{
+    if (!g_is_joined) {
+        return;
+    }
+
+    esp_zb_zcl_report_attr_cmd_t report_cmd = {0};
+
+    report_cmd.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000;
+    report_cmd.zcl_basic_cmd.dst_endpoint = MACROPAD_ENDPOINT;
+    report_cmd.zcl_basic_cmd.src_endpoint = MACROPAD_ENDPOINT;
+    report_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+    report_cmd.clusterID = cluster_id;
+    report_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
+    report_cmd.attributeID = attr_id;
+
+    esp_zb_lock_acquire(portMAX_DELAY);
+    esp_err_t err = esp_zb_zcl_report_attr_cmd_req(&report_cmd);
+    esp_zb_lock_release();
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Report cluster 0x%04X attr 0x%04X failed: %s", cluster_id, attr_id, esp_err_to_name(err));
+    }
+}
+
+static float macropad_encode_button_present_value(uint8_t button_id, action_t action)
+{
+    return (float)(button_id * 16U + ((uint8_t)action & 0x0F));
+}
+
+static void macropad_set_local_attr(uint16_t cluster_id, uint16_t attr_id, void *value)
+{
+    esp_zb_lock_acquire(portMAX_DELAY);
+    esp_zb_zcl_status_t status = esp_zb_zcl_set_attribute_val(MACROPAD_ENDPOINT,
+                                                              cluster_id,
+                                                              ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                                              attr_id,
+                                                              value,
+                                                              false);
+    esp_zb_lock_release();
+
+    if (status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGW(TAG,
+                 "Set local cluster 0x%04X attr 0x%04X failed: 0x%02X",
+                 cluster_id,
+                 attr_id,
+                 status);
+    }
+}
+
+static void macropad_send_custom_button_event(uint8_t button_id, action_t action)
+{
+    if (!g_is_joined) {
+        return;
+    }
+
+    uint8_t payload[2] = {button_id, (uint8_t)action};
     esp_zb_zcl_custom_cluster_cmd_req_t req = {0};
 
-    req.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000;  // coordinator
-    req.zcl_basic_cmd.dst_endpoint          = MACROPAD_ENDPOINT;
-    req.zcl_basic_cmd.src_endpoint          = MACROPAD_ENDPOINT;
-
+    req.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000;
+    req.zcl_basic_cmd.dst_endpoint = MACROPAD_ENDPOINT;
+    req.zcl_basic_cmd.src_endpoint = MACROPAD_ENDPOINT;
     req.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
-    req.cluster_id   = MACROPAD_CLUSTER_ID;
-    req.profile_id   = ESP_ZB_AF_HA_PROFILE_ID;
-    req.direction    = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV;
+    req.cluster_id = MACROPAD_CLUSTER_ID;
+    req.profile_id = ESP_ZB_AF_HA_PROFILE_ID;
+    req.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV;
     req.custom_cmd_id = MACROPAD_CMD_BUTTON_EVENT;
-
-    req.data.type  = ESP_ZB_ZCL_ATTR_TYPE_SET;
-    req.data.size  = sizeof(payload);
+    req.data.type = ESP_ZB_ZCL_ATTR_TYPE_SET;
+    req.data.size = sizeof(payload);
     req.data.value = payload;
 
     esp_zb_lock_acquire(portMAX_DELAY);
     esp_zb_zcl_custom_cluster_cmd_req(&req);
     esp_zb_lock_release();
-
-    //ESP_EARLY_LOGI(TAG, "Sent button event: button=%u action=%u", button_id, action);
 }
 
-static void macropad_send_encoder_rotate(bool clockwise, uint8_t steps)
+static void macropad_send_custom_encoder_rotate(bool clockwise, uint8_t steps)
 {
-    // payload: {direction, steps}
-    // Logic inversion: if clockwise (true) -> send 0 (left/ccw)
-    //                 if !clockwise (false) -> send 1 (right/cw)
-    const uint8_t payload[2] = { (uint8_t)(clockwise ? 0 : 1), steps };
+    if (!g_is_joined) {
+        return;
+    }
 
+    uint8_t payload[2] = {(uint8_t)(clockwise ? 1 : 0), steps};
     esp_zb_zcl_custom_cluster_cmd_req_t req = {0};
 
-    req.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000;  // coordinator
-    req.zcl_basic_cmd.dst_endpoint          = MACROPAD_ENDPOINT;
-    req.zcl_basic_cmd.src_endpoint          = MACROPAD_ENDPOINT;
-
-    req.address_mode  = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
-    req.cluster_id    = MACROPAD_CLUSTER_ID;
-    req.profile_id    = ESP_ZB_AF_HA_PROFILE_ID;
-    req.direction     = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV;
+    req.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000;
+    req.zcl_basic_cmd.dst_endpoint = MACROPAD_ENDPOINT;
+    req.zcl_basic_cmd.src_endpoint = MACROPAD_ENDPOINT;
+    req.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+    req.cluster_id = MACROPAD_CLUSTER_ID;
+    req.profile_id = ESP_ZB_AF_HA_PROFILE_ID;
+    req.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV;
     req.custom_cmd_id = MACROPAD_CMD_ENCODER_ROTATE;
-
-    req.data.type  = ESP_ZB_ZCL_ATTR_TYPE_SET;
-    req.data.size  = sizeof(payload);
-    req.data.value = (void *)payload;
+    req.data.type = ESP_ZB_ZCL_ATTR_TYPE_SET;
+    req.data.size = sizeof(payload);
+    req.data.value = payload;
 
     esp_zb_lock_acquire(portMAX_DELAY);
     esp_zb_zcl_custom_cluster_cmd_req(&req);
     esp_zb_lock_release();
+}
+
+void macropad_send_button_event(uint8_t button_id, action_t action)
+{
+    g_last_button_event = (uint16_t)(((uint16_t)action << 8) | button_id);
+    g_button_input_cfg.present_value = macropad_encode_button_present_value(button_id, action);
+    g_encoder_input_cfg.present_value = BUTTON_EVENT_ANALOG_BASE + g_button_input_cfg.present_value;
+    macropad_set_local_attr(ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
+                            ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
+                            &g_encoder_input_cfg.present_value);
+    macropad_report_attr(ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID);
+    macropad_report_attr(MACROPAD_CLUSTER_ID, MACROPAD_ATTR_BUTTON_EVENT);
+    macropad_send_custom_button_event(button_id, action);
+}
+
+static void macropad_send_encoder_rotate(bool clockwise, uint8_t steps)
+{
+    uint8_t direction = (uint8_t)(clockwise ? 1 : 0);
+    g_last_encoder_event = (uint16_t)(((uint16_t)steps << 8) | direction);
+    g_encoder_input_cfg.present_value = clockwise ? (float)steps : -(float)steps;
+    macropad_set_local_attr(ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
+                            ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
+                            &g_encoder_input_cfg.present_value);
+    macropad_report_attr(ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID);
+    macropad_report_attr(MACROPAD_CLUSTER_ID, MACROPAD_ATTR_ENCODER_EVENT);
+    macropad_send_custom_encoder_rotate(clockwise, steps);
 }
 
 /* ======================================================================= */
